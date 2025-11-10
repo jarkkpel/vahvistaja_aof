@@ -1,0 +1,49 @@
+run_name: default_faustmann
+use_gpu: false
+
+# Paths.
+# -----------------------------------------------------------------------------
+output_path: "../runs/{run_name}"
+
+# Environment.
+# -----------------------------------------------------------------------------
+environment:
+  name:            "Faustmann-v0"
+  discount_factor: 0.97           # Discount factor for future rewards.
+  N_env:           16             # How many parallel environments to use.
+
+# The agent.
+# -----------------------------------------------------------------------------
+agent:
+  file: "agent/ppo.py"
+  class_name: "PPOAgent"
+  params:
+    GAE_lambda: 0.90   # GAE lambda parameter.
+    actor_lr:   0.0003 # Actor learning rate.
+    critic_lr:  0.0001 # Critic learning rate.
+    PPO_clip:   0.25   # PPO clipping parameter.
+    kl_beta:    0.001  # Soft coefficient for the KL divergence/entropy penalty.
+    momentum:   0.9    # ema_momentum in Adam.
+
+# The simulation trace.
+# -----------------------------------------------------------------------------
+simulation_trace:
+  file: "agent/ppo.py"
+  class_name: "PPOSimulationTrace"
+
+# Episodes / training batch settings.
+# -----------------------------------------------------------------------------
+N_episodes: 500     # How many episodes to train.
+N_steps: 1024       # How many steps to run in each environment per episode.
+divide_steps: true  # Whether to divide the number of steps by the number of environments.
+reset_prob: 0.9     # Start 90% of episodes from a random state.
+
+epochs_per_episode: 10 # How many training epochs per episode.
+batch_size: 64         # Trace batch size.
+callbacks:             # Callbacks to be called at the start/end of episode/epoch/batch etc.
+  - file: env/FaustmannDiscreteTime.py
+    class_name: FaustmannCallback
+  - class_name: ThresholdEarlyStop # Stop early if running return is above threshold.
+    params:
+      target_return: 3000
+      patience: 20

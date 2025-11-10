@@ -1,0 +1,10 @@
+gymnasium
+keras
+numpy
+pyyaml
+pytest
+pre-commit
+tensorflow[and-cuda]==2.18.0
+tensorflow_probability
+tf_keras==2.18.0
+tqdm
