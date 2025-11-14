@@ -19,7 +19,7 @@ Vahvistaja is licensed under the MIT license. See [LICENSE](LICENSE) for details
   author = {Lintunen, Jussi and Peltomäki, Jarkko},
   title = {Vahvistaja},
   year = {2025},
-  url = {https://github.com/jalintun/RL_firststeps},
+  url = {https://github.com/jarkkpel/vahvistaja_aof},
   note = {Natural Resources Institute Finland (Luke)}
 }
 ```
