@@ -4,7 +4,7 @@ numpy
 pyyaml
 pytest
 pre-commit
-tensorflow[and-cuda]==2.18.0
+#tensorflow[and-cuda]==2.18.0 # This version required in CSC right now.
+tensorflow[and-cuda]
 tensorflow_probability
-tf_keras==2.18.0
 tqdm

@@ -142,7 +142,9 @@ class TestMarketAgeClassEnv:
     def env(self):
         """Create a MarketACD environment."""
 
-        return MarketAgeClassEnv()
+        env = MarketAgeClassEnv()
+        env.reset(seed=42)
+        return env
 
     def test_initialization(self, env):
         """Test that the environment initializes correctly."""

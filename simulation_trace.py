@@ -1,7 +1,10 @@
-from typing import Union
+from typing import Type
 
 import numpy as np
 import tensorflow as tf
+
+from agent import Agent
+from env import VahvistajaEnvironment
 
 class SimulationTrace:
     """A class to store multiple simulation traces."""
@@ -12,30 +15,32 @@ class SimulationTrace:
 
     def __init__(
         self,
-        N_traces,
-        length,
-        state_dim,
-        action_dim,
-        action_distribution_params_dim,
-        discount_factor=1
+        agent: Agent,
+        N_traces: int,
+        length: int,
+        discount_factor: float = 1.0
     ):
         """Initialize the simulation trace.
 
         Args:
+            agent: The agent used for training.
             N_traces: Number of parallel traces.
             length: Length of each trace.
-            state_dim: Dimension of the state space.
-            action_dim: Dimension of the action space.
-            action_distribution_params_dim: Dimension of the action distribution parameters.
-            discount_factor: Discount factor used in the environment. Defaults to 1.
+            discount_factor: Discount factor used in the environment. Defaults to 1.0.
         """
 
+        self.agent = agent
         self.N_traces = N_traces
         self.length = length
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        self.action_distribution_params_dim = action_distribution_params_dim
+        self.state_dim = agent.state_dim
+        self.action_dim = agent.action_dim
+        self.action_distribution_params_dim = agent.action_distribution_params_dim
         self.discount_factor = discount_factor
+
+        self.epsilon = agent.epsilon
+
+        # Used for saving normalization statistics.
+        self.normalization_stats = {}
 
         # Inhereting class should set these up.
         self.states = None
@@ -46,7 +51,7 @@ class SimulationTrace:
         self.returns = None
         self.state_value_estimates = None
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: str) -> np.ndarray:
         match key:
             case "states":
                 return self.states
@@ -65,14 +70,22 @@ class SimulationTrace:
             case _:
                 raise KeyError(f"Unknown key: {key}")
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: str, value: np.ndarray):
         match key:
             case "state_value_estimates":
                 self.state_value_estimates = value
             case _:
                 raise KeyError(f"Unknown or read-only key: {key}")
 
-    def append(self, t: int, state: np.ndarray, action: np.ndarray, reward: np.ndarray, action_distribution_params: np.ndarray, terminated: np.ndarray):
+    def append(
+        self,
+        t: int,
+        state: np.ndarray,
+        action: np.ndarray,
+        reward: np.ndarray,
+        action_distribution_params: np.ndarray,
+        terminated: np.ndarray
+    ):
         """Append data for time step t.
 
         Args:
@@ -86,7 +99,7 @@ class SimulationTrace:
 
         raise NotImplementedError("Subclasses must implement this method.")
 
-    def preprocess_trace(self, agent: object, next_state_value: np.ndarray):
+    def preprocess_trace(self, agent: Agent, next_state_value: np.ndarray):
         """Preprocess the trace data before batching it for training.
 
         Args:
@@ -96,7 +109,7 @@ class SimulationTrace:
 
         raise NotImplementedError("Subclasses must implement this method.")
 
-    def get_as_dataset(self):
+    def get_as_dataset(self) -> tf.data.Dataset:
         """Return the trace data as a TensorFlow dataset for batched training.
 
         Returns:
@@ -105,7 +118,23 @@ class SimulationTrace:
 
         raise NotImplementedError("Subclasses must implement this method.")
 
-    def unnormalize(self, normalized_values: Union[tf.Tensor,np.ndarray], what: str) -> np.ndarray:
+    def normalize(self) -> dict:
+        """Normalize trace data for training and return normalization statistics.
+
+        This method should normalize relevant trace data (e.g., advantages, returns)
+        according to the agent's normalization settings. The normalized data should
+        be stored back in the trace object, and statistics about the normalization
+        should be returned.
+
+        Returns:
+            Dictionary containing normalization statistics with keys like 'advantages',
+            'returns', etc. Each entry should contain 'mean' and 'std' values used
+            for normalization.
+        """
+
+        raise NotImplementedError("Subclasses must implement this method.")
+
+    def unnormalize(self, normalized_values: tf.Tensor | np.ndarray, what: str) -> np.ndarray:
         """Unnormalize internally normalized values.
 
         Args:
@@ -117,7 +146,13 @@ class SimulationTrace:
 
         raise NotImplementedError("Subclasses must implement this method.")
 
-def simulate_trace(st_class, env, agent, N_steps, init_state):
+def simulate_trace(
+    st_class: Type[SimulationTrace],
+    env: VahvistajaEnvironment,
+    agent: Agent,
+    N_steps: int,
+    init_state: np.ndarray
+) -> tuple[SimulationTrace, np.ndarray]:
     """Computes a simulation trace for the given number of steps.
 
     Arguments:
@@ -139,17 +174,15 @@ def simulate_trace(st_class, env, agent, N_steps, init_state):
     # Create the trace object.
     N_traces = env.num_envs
     trace = st_class(
+        agent=agent,
         N_traces=N_traces,
         length=N_steps,
-        state_dim=agent.state_dim,
-        action_dim=agent.action_dim,
-        action_distribution_params_dim=agent.action_distribution_params_dim,
         discount_factor=discount_factor
     )
 
     for t in range(N_steps):
         # Get the agent's action.
-        action_distribution_params = agent.policy(state)
+        action_distribution_params = agent.policy(state).numpy()
         action_distribution = agent.distribution(action_distribution_params)
         action = action_distribution.sample().numpy()
 
@@ -175,11 +208,12 @@ def simulate_trace(st_class, env, agent, N_steps, init_state):
         #    # terminate the episode?
         #    state, _ = env.reset()
 
-    # Compute the estimated state-value function values in a batch for efficiency.
-    state_value_estimates = agent.value(trace["states"])
+    # Compute the estimated (unnormalized) state-value function values in a
+    # batch for efficiency.
+    state_value_estimates = agent.value(trace["states"], normalize=False)
     trace["state_value_estimates"] = state_value_estimates.numpy()
 
     # Estimate the value of the next state.
-    final_state_value_estimate = agent.value(state).numpy()[0]
+    final_state_value_estimate = agent.value(state, normalize=False).numpy()[0]
 
     return trace, final_state_value_estimate

@@ -1,9 +1,9 @@
+from copy import deepcopy
 import pytest
 import numpy as np
 import tensorflow as tf
 import gymnasium as gym
 import tempfile
-import shutil
 import sys
 import os
 
@@ -84,6 +84,32 @@ class TestPPOAgent:
         assert isinstance(values, tf.Tensor)
         assert values.shape == (batch_size, N_traces)
 
+    def test_value_normalization(self, ppo_agent_continuous):
+        """Test that the value normalization and unnormalization works."""
+
+        agent = ppo_agent_continuous
+        batch_size = 4
+        state_dim = agent.state_dim
+
+        normalization_stats = {
+            "returns": {"mean": 5.0, "std": 2.0}
+        }
+        agent.normalization_stats = normalization_stats
+        state = np.random.random(size=(batch_size, state_dim)).astype(np.float32)
+
+        # Get normalized value estimates.
+        normalized_values = agent.value(state, normalize=True).numpy()
+
+        # Manually unnormalize the values.
+        returns_mean = normalization_stats["returns"]["mean"]
+        returns_std = normalization_stats["returns"]["std"]
+        unnormalized_values_manual = (returns_std + agent.epsilon)*normalized_values + returns_mean
+
+        # Use the agent's unnormalize method.
+        unnormalized_values_agent = agent.value(state, normalize=False).numpy()
+
+        np.testing.assert_array_almost_equal(unnormalized_values_manual, unnormalized_values_agent)
+
     @pytest.mark.ml
     def test_policy_shape(self, ppo_agent_continuous):
         """Test the input and output shapes of the PPO agent."""
@@ -113,7 +139,7 @@ class TestPPOAgent:
 
         # Check for unsupported input.
         with pytest.raises(Exception):
-            agent.value("invalid")
+            agent.policy("invalid")
 
         # Check batch of states in 3D array format.
         N_traces = 2
@@ -187,11 +213,13 @@ class TestPPOAgent:
         _ = agent.policy(dummy_state)
         _ = agent.value(dummy_state)
 
+        # Test saving without normalization stats.
         with tempfile.TemporaryDirectory() as temp_dir:
             # Test saving.
             agent.save(temp_dir)
             assert os.path.exists(os.path.join(temp_dir, "actor.keras"))
             assert os.path.exists(os.path.join(temp_dir, "critic.keras"))
+            assert not os.path.exists(os.path.join(temp_dir, "normalization_stats.npy"))
 
             # Test loading.
             agent_params = {
@@ -203,3 +231,28 @@ class TestPPOAgent:
                 "critic_lr": agent.critic_lr
             }
             loaded_agent = PPOAgent.load(temp_dir, agent_params)
+
+        # Test saving without normalization stats.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Test saving.
+            normalization_stats = {
+                "returns": {"mean": 0.0, "std": 1.0},
+                "advantages": {"mean": 0.0, "std": 1.0}
+            }
+            agent.normalization_stats = deepcopy(normalization_stats)
+            agent.save(temp_dir)
+            assert os.path.exists(os.path.join(temp_dir, "actor.keras"))
+            assert os.path.exists(os.path.join(temp_dir, "critic.keras"))
+            assert os.path.exists(os.path.join(temp_dir, "normalization_stats.npy"))
+
+            # Test loading.
+            agent_params = {
+                "action_space": agent.action_space,
+                "observation_space": agent.observation_space,
+                "GAE_lambda": agent.GAE_lambda,
+                "PPO_clip": agent.PPO_clip,
+                "actor_lr": agent.actor_lr,
+                "critic_lr": agent.critic_lr
+            }
+            loaded_agent = PPOAgent.load(temp_dir, agent_params)
+            assert loaded_agent.normalization_stats == normalization_stats

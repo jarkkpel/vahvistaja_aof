@@ -116,7 +116,7 @@ class TestTrainingIntegration:
         agent = training_agent
 
         # Run very short training.
-        final_episode, final_return = train(
+        final_episode = train(
             agent,
             env,
             PPOSimulationTrace,
@@ -128,7 +128,6 @@ class TestTrainingIntegration:
         )
 
         assert final_episode >= 0
-        assert isinstance(final_return, (float, np.floating))
 
     @pytest.mark.ml
     def test_train_with_early_stopping(self, training_env, training_agent):
@@ -149,7 +148,7 @@ class TestTrainingIntegration:
 
         callback_manager.add_callback(ImmediateStopCallback())
 
-        final_episode, _ = train(
+        final_episode = train(
             agent,
             env,
             PPOSimulationTrace,

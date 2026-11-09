@@ -10,6 +10,10 @@ for both discrete and continuous state and action spaces.
 
 [1] OpenAI. Proximal Policy Optimization. <https://spinningup.openai.com/en/latest/algorithms/ppo.html> Retrieved 5.11.2025.
 
+# Requirements
+Vahvistaja requires Python 3.10 or higher. The required packages are listed in
+`requirements.txt`.
+
 # License
 Vahvistaja is licensed under the MIT license. See [LICENSE](LICENSE) for details.
 

@@ -11,6 +11,20 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 from agent.ppo import PPOSimulationTrace
 
 
+class MockAgent:
+    """Mock agent for testing trace functionality."""
+    def __init__(self):
+        self.normalize_advantages = True
+        self.normalize_returns = True
+        self.GAE_lambda = 0.9
+
+        self.epsilon = 1e-8
+
+        self.state_dim = 3
+        self.action_dim = 2
+        self.action_distribution_params_dim = 4
+
+
 class TestPPOSimulationTrace:
     """Test the PPO simulation trace implementation."""
 
@@ -21,17 +35,19 @@ class TestPPOSimulationTrace:
         return {
             "N_traces": 2,
             "length": 5,
-            "state_dim": 3,
-            "action_dim": 2,
-            "action_distribution_params_dim": 4,
             "discount_factor": 0.9
         }
 
     @pytest.fixture
-    def ppo_trace(self, trace_params):
+    def mock_agent(self):
+        """Create a mock agent for testing."""
+        return MockAgent()
+
+    @pytest.fixture
+    def ppo_trace(self, trace_params, mock_agent):
         """Create a PPO simulation trace for testing."""
 
-        return PPOSimulationTrace(**trace_params)
+        return PPOSimulationTrace(agent=mock_agent, **trace_params)
 
     def test_trace_initialization(self, ppo_trace, trace_params):
         """Test trace initialization."""
@@ -40,9 +56,9 @@ class TestPPOSimulationTrace:
 
         N_traces = trace_params["N_traces"]
         length = trace_params["length"]
-        state_dim = trace_params["state_dim"]
-        action_dim = trace_params["action_dim"]
-        action_distribution_params_dim = trace_params["action_distribution_params_dim"]
+        state_dim = trace.agent.state_dim
+        action_dim = trace.agent.action_dim
+        action_distribution_params_dim = trace.agent.action_distribution_params_dim
         discount_factor = trace_params["discount_factor"]
 
         assert trace.N_traces == N_traces
@@ -64,9 +80,9 @@ class TestPPOSimulationTrace:
         trace = ppo_trace
 
         N_traces = trace_params["N_traces"]
-        state_dim = trace_params["state_dim"]
-        action_dim = trace_params["action_dim"]
-        action_distribution_params_dim = trace_params["action_distribution_params_dim"]
+        state_dim = trace.agent.state_dim
+        action_dim = trace.agent.action_dim
+        action_distribution_params_dim = trace.agent.action_distribution_params_dim
         discount_factor = trace_params["discount_factor"]
 
         # Create sample data with random values.
@@ -110,9 +126,9 @@ class TestPPOSimulationTrace:
         trace = ppo_trace
 
         N_traces = trace_params["N_traces"]
-        state_dim = trace_params["state_dim"]
-        action_dim = trace_params["action_dim"]
-        action_distribution_params_dim = trace_params["action_distribution_params_dim"]
+        state_dim = trace.agent.state_dim
+        action_dim = trace.agent.action_dim
+        action_distribution_params_dim = trace.agent.action_distribution_params_dim
 
         # Fill trace with artificial data.
         for t in range(trace.length):
@@ -128,15 +144,48 @@ class TestPPOSimulationTrace:
         trace["state_value_estimates"] = np.array([[10, 15], [10, 14], [9, 12], [7, 9], [4, 5]])
 
         # Compute advantages and returns.
-        trace.compute_advantages_and_returns(GAE_lambda=0.9, next_state_value=0.0)
-        normalized_values = trace["estimated_advantages"]
-        estimated_advantages = trace.unnormalize(normalized_values, "advantages")
-        normalized_values = trace["estimated_returns"]
-        estimated_returns = trace.unnormalize(normalized_values, "returns")
+        trace.compute_advantages_and_returns(GAE_lambda=0.9, next_state_value=None)
 
         # Hand-computed correct estimated advantages and returns.
         correct_estimated_advantages = np.array([[-2.4008464, -3.22821], [-1.72944, -2.25705], [-1.024, -1.305], [-0.4, -0.5], [0, 0]])
         correct_estimated_returns = correct_estimated_advantages + trace["state_value_estimates"]
 
-        np.testing.assert_array_almost_equal(estimated_advantages, correct_estimated_advantages)
-        np.testing.assert_array_almost_equal(estimated_returns, correct_estimated_returns)
+        np.testing.assert_array_almost_equal(trace["estimated_advantages"], correct_estimated_advantages)
+        np.testing.assert_array_almost_equal(trace["estimated_returns"], correct_estimated_returns)
+
+    def test_normalize_for_training(self, trace_params, mock_agent):
+        """Test normalization of advantages and returns for training."""
+
+        # Normalize only advantages.
+        mock_agent.normalize_advantages = True
+        mock_agent.normalize_returns = False
+
+        trace = PPOSimulationTrace(agent=mock_agent, **trace_params)
+        N_traces = trace_params["N_traces"]
+        state_dim = trace.agent.state_dim
+        action_dim = trace.agent.action_dim
+        action_distribution_params_dim = trace.agent.action_distribution_params_dim
+
+        # Fill trace with artificial data.
+        for t in range(trace.length):
+            state = np.random.random((N_traces, state_dim))
+            action = np.random.random((N_traces, action_dim))
+            reward = np.array([float(t), float(t + 1)])
+            action_dist_params = np.random.random((N_traces, action_distribution_params_dim))
+            terminated = np.array([False]*N_traces)
+
+            trace.append(t, state, action, reward, action_dist_params, terminated)
+
+        trace["state_value_estimates"] = np.array([[10, 15], [10, 14], [9, 12], [7, 9], [4, 5]])
+        trace.compute_advantages_and_returns(GAE_lambda=0.9, next_state_value=None)
+
+        original_advantages = trace["estimated_advantages"].copy()
+        original_returns = trace["estimated_returns"].copy()
+
+        # Test normalizing advantages only.
+        stats = trace.normalize()
+        assert "advantages" in stats
+        assert "returns" not in stats
+        assert "mean" in stats["advantages"] and "std" in stats["advantages"]
+        assert not np.array_equal(trace["estimated_advantages"], original_advantages)  # Should be normalized.
+        assert np.array_equal(trace["estimated_returns"], original_returns)            # Should be unchanged.

@@ -1,7 +1,8 @@
 import importlib.util
 import os
-import random
 from pathlib import Path
+import random
+from typing import Any
 
 import numpy as np
 
@@ -63,7 +64,7 @@ def set_seed(seed: int):
     tf.random.set_seed(seed)
     tf.experimental.numpy.random.seed(seed)
 
-def load_config(config_file: str):
+def load_config(config_file: str) -> dict[str, Any]:
     """Load a YAML configuration file.
 
     Args:
@@ -114,18 +115,31 @@ def load_method(file: str, name: str) -> object:
     cls = getattr(module, name)
     return cls
 
-def create_environment(env_name: str, N_envs: int=1, discount_factor: float=1.0) -> AsyncVectorEnv:
+def create_environment(env_name: str, N_envs: int=1, discount_factor: float=1.0, seed: int | None = None) -> AsyncVectorEnv:
     """Creates and sets up the environment (possibly multiple).
 
     Args:
         env_name: The name of the environment to create.
         N_envs: Number of parallel environments to create. Defaults to 1.
-        discount_factor: The discount factor to be used. Defaults to 1.
+        discount_factor: The discount factor to be used. Defaults to 1.0.
+        seed: Base seed for reproducibility. Each env gets seed + env_idx. Defaults to None.
     Returns:
         The created environments as an AsyncVectorEnv.
     """
 
-    env_fn = [lambda env_idx=i: gym.make(env_name, env_idx=env_idx, discount_factor=discount_factor) for i in range(N_envs)]
+    def make_env(env_idx: int):
+        """Create a single environment with proper seeding."""
+
+        def _init():
+            env = gym.make(env_name, env_idx=env_idx, discount_factor=discount_factor)
+            # Seed each environment subprocess with a unique but deterministic seed.
+            if seed is not None:
+                env.reset(seed=seed + env_idx)
+            return env
+
+        return _init
+
+    env_fn = [make_env(i) for i in range(N_envs)]
     vec_env = AsyncVectorEnv(env_fn)
     return vec_env
 

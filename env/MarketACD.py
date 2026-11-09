@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Any
 
 import gymnasium as gym
 from gymnasium.envs.registration import register
@@ -45,7 +45,7 @@ class MarketAgeClassEnv(VahvistajaEnvironment):
     considered here except on a brief comment level.
     """
 
-    def __init__(self, env_idx: Union[int,None]=None, discount_factor: float=1.0):
+    def __init__(self, env_idx: int | None = None, discount_factor: float = 1.0):
         """Initialize the Market-level age class environment.
 
         Args:
@@ -65,13 +65,9 @@ class MarketAgeClassEnv(VahvistajaEnvironment):
 
         self.eps = 1e-8
 
-        # Initial state.
-        # We sample positive values for age classes 1-8 (uniformly random), zeros for the rest.
-        self.init_state = np.zeros(self.A_max, dtype=np.float32)
-        uniform_values = np.random.uniform(0, 1, 8)
-        uniform_values = uniform_values / np.sum(uniform_values) * self.X_tot
-        self.init_state[:8] = uniform_values
-        self.state = self.init_state.copy()
+        # Initial state will be set in self.reset.
+        self.init_state = None
+        self.state = None
 
         # Payoff constants.
         self.p0 = 50
@@ -145,6 +141,17 @@ class MarketAgeClassEnv(VahvistajaEnvironment):
 
         return self.state, np.float32(payoff), terminated, truncated, {}
 
+    def _initialize_state(self):
+        """Initialize the state."""
+
+        if self.init_state is None:
+            # We sample positive values for age classes 1-8 (uniformly random),
+            # zeros for the rest.
+            self.init_state = np.zeros(self.A_max, dtype=np.float32)
+            uniform_values = self._np_random.uniform(0, 1, 8)
+            uniform_values = uniform_values / np.sum(uniform_values) * self.X_tot
+            self.init_state[:8] = uniform_values
+
     def get_random_state(self) -> np.ndarray:
         """Return a random state sampled from the observation space.
 
@@ -156,7 +163,7 @@ class MarketAgeClassEnv(VahvistajaEnvironment):
         state = state / np.sum(state) * self.X_tot
         return state
 
-    def reset(self, seed: Union[int,None] = None, options: Union[dict,list,None] = None):
+    def reset(self, seed: int | None = None, options: dict | list | None = None) -> tuple[np.ndarray, dict]:
         """Reset the environment to a state.
 
         Args:
@@ -169,8 +176,8 @@ class MarketAgeClassEnv(VahvistajaEnvironment):
         """
 
         super().reset(seed=seed)
-        if seed is not None:
-            self.seed(seed)
+        # Initialize state on first reset (after seeding via super().reset()).
+        self._initialize_state()
 
         if options is not None:
             if self.env_idx is not None:
@@ -197,3 +204,189 @@ class MarketAgeClassEnv(VahvistajaEnvironment):
     def close(self):
         pass
 
+class MarketACDCallback(BaseCallback):
+    """An optional callback for the MarketACD environment that tracks and saves
+    the following:
+    - beta distribution parameters for a fixed state,
+    - training losses,
+    - estimated returns for the fixed state,
+    - state visit frequencies in datasets throughout training (optional).
+    On each episode end, prints out action beta distribution parameters and
+    their running means for a certain fixed state. In addition, prints mean
+    action for that state and estimated state value.
+    """
+
+    def __init__(self, track_visit_counts=False, bins=10):
+        super().__init__()
+
+        self.track_visit_counts = track_visit_counts
+        self.bins = bins
+
+        # To be set on the first call to on_episode_end.
+        self.state = None
+        self.A = None
+        self.B = None
+
+        self.losses = {"critic_loss": [], "actor_loss": []}
+        self.return_estimates = []
+        if self.track_visit_counts:
+            self.visit_counts = np.zeros((15, self.bins), dtype=np.int32)
+        else:
+            self.visit_counts = None
+
+    def on_dataset_creation(self, dataset: tf.data.Dataset):
+        """Track the states visited in datasets throughout the training."""
+
+        if not self.track_visit_counts: return
+
+        states = np.array([row[0].numpy() for row in dataset])
+
+        # Vectorized binning: clip values to [0, 1), then multiply by bins and convert to int.
+        bin_indices = np.clip(states, 0, 1 - 1e-10) * self.bins
+        bin_indices = bin_indices.astype(np.int32)
+
+        for age_class in range(bin_indices.shape[1]):
+            np.add.at(self.visit_counts[age_class], bin_indices[:, age_class], 1)
+
+    def on_epoch_end(self, episode: int, logs: dict[str, Any] | None = None):
+        self.losses["critic_loss"].append(logs["avg_losses"].get("critic_loss", None))
+        self.losses["actor_loss"].append(logs["avg_losses"].get("actor_loss", None))
+
+    def on_episode_end(self, episode: int, logs: dict[str, Any] | None = None):
+        if self.state is None:
+            # The state has X_tot/8 for age classes 1-8, zeros for the rest.
+            self.state = np.zeros((1, self.env.get_attr("A_max")[0]), dtype=np.float32)
+            self.state[0, 0:8] = self.env.get_attr("X_tot")[0] / 8.0
+
+        # Save distribution parameters for the fixed state.
+        action_distribution_params = self.agent.policy(self.state)
+        distribution = self.agent.distribution(action_distribution_params)
+
+        # Detect distribution type and extract parameters.
+        dist_name = getattr(self.agent, "distribution_name", None)
+        if dist_name and "beta" in dist_name.lower():
+            # Beta distribution.
+            A = distribution.concentration1.numpy().flatten()
+            B = distribution.concentration0.numpy().flatten()
+            if self.A is None:
+                self.A = A.reshape(1, -1)
+                self.B = B.reshape(1, -1)
+            else:
+                self.A = np.concatenate((self.A, A.reshape(1, -1)), axis=0)
+                self.B = np.concatenate((self.B, B.reshape(1, -1)), axis=0)
+
+            value = self.agent.value(self.state).numpy().flatten()[0]
+            mean_actions = A / (A + B)
+
+            with np.printoptions(precision=2, suppress=True):
+                print(f"Episode {episode+1:02}: Beta distribution parameters for fixed state:")
+                print(f"  Alpha: {A}")
+                print(f"  Beta:  {B}")
+                print(f"  Mean actions: {mean_actions}")
+                print(f"  Mean parameters so far:")
+                print(f"    Alpha {np.mean(self.A, axis=0)} ({np.std(self.A, axis=0)})")
+                print(f"    Beta {np.mean(self.B, axis=0)} ({np.std(self.B, axis=0)})")
+                print(f"  Estimated state value: {value:.2f}")
+        elif dist_name and "logistic_normal" in dist_name.lower():
+            # Logistic normal distribution - extract loc and scale from underlying Normal
+            loc = distribution.distribution.loc.numpy().flatten()
+            scale = distribution.distribution.scale.numpy().flatten()
+            if self.A is None:
+                self.A = loc.reshape(1, -1)
+                self.B = scale.reshape(1, -1)
+            else:
+                self.A = np.concatenate((self.A, loc.reshape(1, -1)), axis=0)
+                self.B = np.concatenate((self.B, scale.reshape(1, -1)), axis=0)
+
+            value = self.agent.value(self.state).numpy().flatten()[0]
+            # Mean of logistic normal: approximate using sigmoid(loc) for small scale.
+            mean_actions = 1.0 / (1.0 + np.exp(-loc))
+
+            with np.printoptions(precision=2, suppress=True):
+                print(f"Episode {episode+1:02}: Logistic-Normal distribution parameters for fixed state:")
+                print(f"  Loc:   {loc}")
+                print(f"  Scale: {scale}")
+                print(f"  Mean actions: {mean_actions}")
+                print(f"  Mean parameters so far:")
+                print(f"    Loc   {np.mean(self.A, axis=0)} ({np.std(self.A, axis=0)})")
+                print(f"    Scale {np.mean(self.B, axis=0)} ({np.std(self.B, axis=0)})")
+                print(f"  Estimated state value: {value:.2f}")
+        else:
+            # Unknown distribution type.
+            raise ValueError(f"Unknown or unsupported distribution type: {dist_name}. Supported types are 'beta', 'beta_restricted', and 'logistic_normal'.")
+
+        # Save estimated value for the fixed state.
+        self.return_estimates.append(value)
+
+    def on_train_end(self, logs: dict[str, Any] | None = None):
+        """Save the collected distribution parameters and state visit
+        frequencies to a file."""
+
+        if self.artifact_manager is None:
+            return
+
+        # Register the artifacts and get the path generators.
+        try:
+            get_distribution_path = self.artifact_manager.register_artifact(
+                artifact_identifier="distribution_parameters",
+                artifact_description="MarketACD_distribution_parameters",
+                file_name_generator=lambda x: "distribution_parameters.csv",
+                check_conflicts=True
+            )
+            get_return_estimate_path = self.artifact_manager.register_artifact(
+                artifact_identifier="return_estimates",
+                artifact_description="MarketACD_return_estimates",
+                file_name_generator=lambda x: "return_estimates.csv",
+                check_conflicts=True
+            )
+            get_loss_path = self.artifact_manager.register_artifact(
+                artifact_identifier="training_losses",
+                artifact_description="MarketACD_training_losses",
+                file_name_generator=lambda x: "training_losses.csv",
+                check_conflicts=True
+            )
+            if self.track_visit_counts:
+                get_visit_freq_path = self.artifact_manager.register_artifact(
+                    artifact_identifier="visit_frequencies",
+                    artifact_description="MarketACD_visit_frequencies",
+                    file_name_generator=lambda x: "visit_frequencies.csv",
+                    check_conflicts=True
+                )
+        except FileExistsError as e:
+            raise e
+
+        # Save distribution parameters.
+        file_path = get_distribution_path(None)
+        data = np.column_stack((self.A, self.B))
+
+        # Set headers based on distribution type
+        dist_name = getattr(self.agent, 'distribution_name', None)
+        if dist_name and 'logistic_normal' in dist_name.lower():
+            header_A = ",".join([f"loc{i+1}" for i in range(self.A.shape[1])])
+            header_B = ",".join([f"scale{i+1}" for i in range(self.B.shape[1])])
+        else:
+            # Default to beta naming
+            header_A = ",".join([f"A{i+1}" for i in range(self.A.shape[1])])
+            header_B = ",".join([f"B{i+1}" for i in range(self.B.shape[1])])
+
+        header = header_A + "," + header_B
+        np.savetxt(file_path, data, delimiter=",", header=header, comments="", fmt=",".join("%.6f" for _ in range(self.A.shape[1] + self.B.shape[1])))
+
+        # Save return estimates.
+        file_path = get_return_estimate_path(None)
+        header = "return_estimate"
+        data = np.array(self.return_estimates).reshape(-1, 1)
+        np.savetxt(file_path, data, delimiter=",", header=header, comments="", fmt="%.6f")
+
+        # Save training losses.
+        file_path = get_loss_path(None)
+        header = "critic_loss,actor_loss"
+        data = np.column_stack((np.array(self.losses["critic_loss"]), np.array(self.losses["actor_loss"])))
+        np.savetxt(file_path, data, delimiter=",", header=header, comments="", fmt="%.6f,%.6f")
+
+        # Save state frequencies.
+        if self.track_visit_counts:
+            file_path = get_visit_freq_path(None)
+            header = ",".join([f"Bin{i}" for i in range(self.bins)])
+            visit_freq = self.visit_counts / np.sum(self.visit_counts, axis=1, keepdims=True)
+            np.savetxt(file_path, visit_freq, delimiter=",", header=header, comments="", fmt=",".join("%.6f" for _ in range(self.bins)))

@@ -1,5 +1,6 @@
 run_name: default_marketacd
 use_gpu: false
+epsilon: 1e-8  # Small constant for numerical stability.
 
 # Paths.
 # -----------------------------------------------------------------------------
@@ -18,13 +19,15 @@ agent:
   file: "agent/ppo.py"
   class_name: "PPOAgent"
   params:
-    distribution: "beta"  # Action distribution whose parameters the actor estimates.
-    GAE_lambda:    0.90   # GAE lambda parameter.
-    actor_lr:      0.0003 # Actor learning rate.
-    critic_lr:     0.0001 # Critic learning rate.
-    PPO_clip:      0.25   # PPO clipping parameter.
-    kl_beta:       0.001  # Soft coefficient for the KL divergence/entropy penalty.
-    momentum:      0.9    # ema_momentum in Adam.
+    distribution: "beta"        # Action distribution whose parameters the actor estimates.
+    GAE_lambda: 0.90            # GAE lambda parameter.
+    PPO_clip:   0.25            # PPO clipping parameter.
+    actor_lr:   0.0003          # Actor learning rate.
+    critic_lr:  0.0001          # Critic learning rate.
+    momentum:   0.9             # ema_momentum in Adam.
+    kl_beta:    0.0             # Soft coefficient for the KL divergence/entropy penalty.
+    normalize_advantages: true  # Whether to normalize advantages during training.
+    normalize_returns:    true  # Whether to normalize returns during training.
 
 # The simulation trace.
 # -----------------------------------------------------------------------------
@@ -42,6 +45,10 @@ reset_prob: 0.9     # Start 90% of episodes from a random state.
 epochs_per_episode: 10 # How many training epochs per episode.
 batch_size: 64         # Trace batch size.
 callbacks:             # Callbacks to be called at the start/end of episode/epoch/batch etc.
+  - file: "env/MarketACD.py"
+    class_name: "MarketACDCallback"
+    params:
+      track_visit_counts: true
   - class_name: ThresholdEarlyStop # Stop early if running return is above threshold.
     params:
       target_return: 3000

@@ -113,7 +113,10 @@ discrete categorical distribution is assumed.
 
 An agent needs to define the following methods:
 - policy(state): Returns the action distribution parameters for the given state(s).
-- value(state): Returns the state value estimate for the given state(s).
+- value(state): Returns the state value estimate for the given state(s). By
+  default the returned value is not normalized in any way. A normalized value
+  can be returned by setting the argument `normalized=True` in case the agent
+  implements value normalization.
 - train_on_batch(*args): Trains the agent on a batch of training data. The
   training data consists of Tensorflow tensors from a simulation trace
   `get_as_dataset` method call.
@@ -127,11 +130,9 @@ For the exact argument types and return types, see the `Agent` class in
 
 # Simulation Traces
 Simulation trace is an object that records the actions, rewards, etc. of an agent when started from a state. A simulation trace class should inherit from the `SimulationTrace` class defined in `simulation_trace.py`. This base class initializer takes the following arguments:
+- agent: The agent whose actions are being recorded.
 - N_traces: Number of parallel traces to be recorded (corresponds to the number of parallel environments).
 - length: Common length of each trace.
-- state_dim: Dimension of the environment observation space (state space).
-- action_dim: Dimension of the environment action space.
-- action_distribution_params_dim: Dimension of the action distribution parameters.
 - discount_factor: Discount factor used in the environment(s).
 
 The simulation trace class needs to implement the following methods:
@@ -179,10 +180,30 @@ setting the attributo `self.stop_training` to `True`. Example callbacks are
 defined in `callbacks.py`.
 
 # Training Artifacts
-Training artifacts such as trained models and training logs are saved at the
-end of the training. The saved artifacts are managed by the `ArtifactManager`
-class defined in `artifact_manager.py`. Currently the artifact manager cannot
-be customized, and it simply calls the agent's `save` method to save the agent.
+Artifact manager (a single instance of the `ArtifactManager` class) manages the
+save paths for training artifacts such as trained models and training logs. The
+artifact manager is exposed to callbacks, which should register the artifacts
+they wish to save via the manager's `register_artifact` method. The method
+takes the following arguments:
+- artifact_identifier: Identifier for the artifact (e.g., 'harvest_probabilities', 'models'). Used as part of the artifact's path.
+- artifact_description: Artifact description.
+- file_name_generator: Function that takes arbitrary arguments and returns a
+  filename.
+- check_conflicts: Whether to check for existing files in the artifact
+  directory.
+
+The idea is that the callback provides a callable `file_name_generator` that
+takes arbitrary arguments and returns file names/local paths. The return value
+of the `register_artifact` wraps this function so that the file names/local
+paths point to a save location dictated by the configuration file. For example,
+suppose that `file_name_generator` takes as its argument an integer `i` and
+returns a file name `model_{i}.keras`. Then the wrapped function (with the same
+arguments) returns a path
+`{global_save_path}/{artifact_identifier}/model_{i}.keras`, so the callback
+does not need to know about what `global_save_path` is. Additionally, the
+manager checks if files already exist in
+`{global_save_path}/{artifact_identifier}` to avoid overwriting files and it
+ensures that the this path  exists.
 
 # Example Run
 Running

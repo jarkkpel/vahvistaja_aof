@@ -1,25 +1,34 @@
-from typing import Union
+from gymnasium.vector import AsyncVectorEnv
 
 from agent import Agent
+from artifact_manager import ArtifactManager
 from callbacks import BaseCallback
 from env import VahvistajaEnvironment
 
 class CallbackManager:
     """Manages a list of callbacks and provides convenient methods to call them."""
 
-    def __init__(self, env: VahvistajaEnvironment, agent: Agent, callbacks: Union[list,None]=None):
+    def __init__(
+        self,
+        env: VahvistajaEnvironment | AsyncVectorEnv,
+        agent: Agent,
+        callbacks: list | None = None,
+        artifact_manager: ArtifactManager | None = None
+    ):
         """Initialize the callback manager.
 
         Args:
             env: The environment.
             agent: The agent.
             callbacks: An optional list of callbacks to manage.
+            artifact_manager: Optional artifact manager to pass to callbacks.
         """
 
         self.env = env
         self.agent = agent
         self.callbacks = callbacks or []
-        self.stop_training = False       # Flag for early stopping.
+        self.artifact_manager = artifact_manager
+        self.stop_training = False # Flag for early stopping.
 
     def add_callback(self, callback: BaseCallback):
         """Add a single callback.
@@ -31,6 +40,8 @@ class CallbackManager:
         self.callbacks.append(callback)
         callback.set_agent(self.agent)
         callback.set_environment(self.env)
+        if self.artifact_manager is not None:
+            callback.set_artifact_manager(self.artifact_manager)
 
     def _call_method(self, method_name, *args, **kwargs):
         for callback in self.callbacks:
@@ -52,6 +63,9 @@ class CallbackManager:
     def on_episode_end(self, episode, logs=None):
         self._call_method("on_episode_end", episode, logs)
 
+    def on_dataset_creation(self, dataset):
+        self._call_method("on_dataset_creation", dataset)
+
     def on_epoch_begin(self, epoch, logs=None):
         self._call_method("on_epoch_begin", epoch, logs)
 
@@ -64,7 +78,7 @@ class CallbackManager:
     def on_train_batch_end(self, batch, logs=None):
         self._call_method("on_train_batch_end", batch, logs)
 
-    def should_stop_training(self):
+    def should_stop_training(self) -> bool:
         return self.stop_training
 
     def reset_stop_flag(self):

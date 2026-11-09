@@ -3,17 +3,18 @@ Proximal Policy Optimization (PPO) agent implementation. Follows largely the pap
 
     J. Schulman et al.: Proximal policy optimization algorithms (2017). https://arxiv.org/abs/1707.06347
 
-and implements the agent according to the actor-critic style.
-"""
+and implements the agent according to the actor-critic style. See also
 
-from typing import Union
+    https://spinningup.openai.com/en/latest/algorithms/ppo.html
+"""
 
 import numpy as np
 import os
 
+import keras
+from keras import layers
+from keras.optimizers import Adam
 import tensorflow as tf
-import tensorflow.keras.layers as layers
-from tensorflow.keras.optimizers import Adam
 import tensorflow_probability as tfp
 tfd = tfp.distributions
 
@@ -21,26 +22,36 @@ from simulation_trace import SimulationTrace
 
 from agent import Agent
 
-@tf.keras.utils.register_keras_serializable(package="agent.ppo")
-class Actor(tf.keras.Model):
+@keras.utils.register_keras_serializable(package="agent.ppo")
+class Actor(keras.Model):
     """The actor model that outputs action logits."""
 
     def __init__(self, num_actions, **kwargs):
         super().__init__(**kwargs)
         self.num_actions = num_actions
-        #self.layer1 = layers.Dense(64, activation='leaky_relu')
-        #self.layer2 = layers.Dense(64, activation='leaky_relu')
-        self.layer1 = layers.Dense(64, activation='tanh')
-        self.layer2 = layers.Dense(64, activation='tanh')
-        #self.bn1 = layers.BatchNormalization()
-        #self.bn2 = layers.BatchNormalization()
-        self.logits = layers.Dense(num_actions, activation='linear', name='policy_logits')
+        self.layer1 = layers.Dense(
+            64,
+            activation="tanh",
+            kernel_initializer="orthogonal",
+            bias_initializer="zeros"
+        )
+        self.layer2 = layers.Dense(
+            64,
+            activation="tanh",
+            kernel_initializer="orthogonal",
+            bias_initializer='zeros'
+        )
+        self.logits = layers.Dense(
+            num_actions,
+            activation="linear",
+            name="policy_logits",
+            kernel_initializer=keras.initializers.Orthogonal(gain=0.01),
+            bias_initializer="zeros"
+        )
 
     def call(self, state):
         x = self.layer1(state)
         x = self.layer2(x)
-        #x = self.layer1(self.bn1(state))
-        #x = self.layer2(self.bn2(x))
         return self.logits(x)
 
     def get_config(self):
@@ -54,25 +65,35 @@ class Actor(tf.keras.Model):
     def from_config(cls, config):
         return cls(**config)
 
-@tf.keras.utils.register_keras_serializable(package="agent.ppo")
-class Critic(tf.keras.Model):
+@keras.utils.register_keras_serializable(package="agent.ppo")
+class Critic(keras.Model):
     """The critic model that estimates the state-value function."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        #self.layer1 = layers.Dense(64, activation='leaky_relu')
-        #self.layer2 = layers.Dense(64, activation='leaky_relu')
-        self.layer1 = layers.Dense(64, activation='tanh')
-        self.layer2 = layers.Dense(64, activation='tanh')
-        #self.bn1 = layers.BatchNormalization()
-        #self.bn2 = layers.BatchNormalization()
-        self.value = layers.Dense(1, activation='linear', name='value')
+        self.layer1 = layers.Dense(
+            64,
+            activation="tanh",
+            kernel_initializer="orthogonal",
+            bias_initializer="zeros"
+        )
+        self.layer2 = layers.Dense(
+            64,
+            activation="tanh",
+            kernel_initializer="orthogonal",
+            bias_initializer="zeros"
+        )
+        self.value = layers.Dense(
+            1,
+            activation="linear",
+            name="value",
+            kernel_initializer="orthogonal",
+            bias_initializer="zeros"
+        )
 
     def call(self, state):
         x = self.layer1(state)
         x = self.layer2(x)
-        #x = self.layer1(self.bn1(state))
-        #x = self.layer2(self.bn2(x))
         return self.value(x)
 
 class PPOAgent(Agent):
@@ -88,8 +109,11 @@ class PPOAgent(Agent):
         actor_lr=3e-4,
         critic_lr=1e-4,
         momentum=0.9,
-        kl_beta=0.001,
-        use_kl_divergence=False
+        kl_beta=0.0,
+        use_kl_divergence=False,
+        normalize_advantages=True,
+        normalize_returns=True,
+        epsilon=1e-8
     ):
         """Initialize the PPO agent.
 
@@ -102,26 +126,29 @@ class PPOAgent(Agent):
             actor_lr: The learning rate for the actor network. Defaults to 3e-4.
             critic_lr: The learning rate for the critic network. Defaults to 1e-4.
             momentum: The momentum for the optimizer. Defaults to 0.9.
-            kl_beta: The coefficient for the KL divergence/entropy penalty. Defaults to 0.001.
+            kl_beta: The coefficient for the KL divergence/entropy penalty. Defaults to 0.0.
             use_kl_divergence: Whether to use KL divergence (True) or entropy (False) for regularization. Defaults to True.
+            normalize_advantages: Whether to normalize advantages during training. Defaults to True.
+            normalize_returns: Whether to normalize returns during training. Defaults to False.
+            epsilon: Small constant for numerical stability. Defaults to 1e-8.
         """
 
-        super().__init__(action_space=action_space, observation_space=observation_space, distribution=distribution)
-        self.GAE_lambda = GAE_lambda                # GAE lambda parameter.
-        self.PPO_clip = PPO_clip                    # PPO clipping parameter.
-        self.actor_lr = actor_lr                    # Actor learning rate.
-        self.critic_lr = critic_lr                  # Critic learning rate.
-        self.momentum = momentum                    # ema_momentum in Adam.
-        self.kl_beta = kl_beta                      # Soft coefficient for the KL divergence/entropy penalty.
-        self.use_kl_divergence = use_kl_divergence  # Whether to use KL divergence (True) or entropy (False) for regularization.
+        super().__init__(action_space=action_space, observation_space=observation_space, distribution=distribution, epsilon=epsilon)
+        self.GAE_lambda = GAE_lambda
+        self.PPO_clip = PPO_clip
+        self.actor_lr = actor_lr
+        self.critic_lr = critic_lr
+        self.momentum = momentum
+        self.kl_beta = kl_beta
+        self.use_kl_divergence = use_kl_divergence
+        self.normalize_advantages = normalize_advantages
+        self.normalize_returns = normalize_returns
 
         self.actor = Actor(self.action_distribution_params_dim)
         self.critic = Critic()
 
         self.actor_optimizer = Adam(learning_rate=self.actor_lr)
         self.critic_optimizer = Adam(learning_rate=self.critic_lr)
-
-        self.eps = np.finfo(np.float32).eps.item()
 
     @classmethod
     def get_save_file_names(cls) -> dict:
@@ -131,7 +158,11 @@ class PPOAgent(Agent):
             Dictionary with keys 'actor' and 'critic' mapping to their respective filenames.
         """
 
-        return {"actor": "actor.keras", "critic": "critic.keras"}
+        return {
+            "actor": "actor.keras",
+            "critic": "critic.keras",
+            "normalization_stats": "normalization_stats.npy"
+        }
 
     def save(self, save_path: str):
         """Save the agent.
@@ -143,9 +174,14 @@ class PPOAgent(Agent):
         file_names = self.get_save_file_names()
         actor_file_name = os.path.join(save_path, file_names["actor"])
         critic_file_name = os.path.join(save_path, file_names["critic"])
+        normalization_stats_file_name = os.path.join(save_path, file_names["normalization_stats"])
 
         self.actor.save(actor_file_name)
         self.critic.save(critic_file_name)
+
+        # Save normalization statistics if needed.
+        if len(self.normalization_stats) > 0:
+            np.save(normalization_stats_file_name, self.normalization_stats, allow_pickle=True)
 
     @classmethod
     def load(cls, load_path: str, agent_parameters: dict) -> object:
@@ -161,17 +197,22 @@ class PPOAgent(Agent):
         file_names = cls.get_save_file_names()
         actor_file_name = os.path.join(load_path, file_names["actor"])
         critic_file_name = os.path.join(load_path, file_names["critic"])
+        normalization_stats_file_name = os.path.join(load_path, file_names["normalization_stats"])
 
         # Create a new agent.
         agent = cls(**agent_parameters)
 
         # Load the saved models.
-        agent.actor = tf.keras.models.load_model(actor_file_name)
-        agent.critic = tf.keras.models.load_model(critic_file_name)
+        agent.actor = keras.models.load_model(actor_file_name)
+        agent.critic = keras.models.load_model(critic_file_name)
+
+        # Load normalization statistics if they exist.
+        if os.path.exists(normalization_stats_file_name):
+            agent.normalization_stats = np.load(normalization_stats_file_name, allow_pickle=True).item()
 
         return agent
 
-    def _preprocess_state(self, state: Union[tf.Tensor, np.ndarray]) -> tuple[tf.Tensor, tuple]:
+    def _preprocess_state(self, state: tf.Tensor | np.ndarray) -> tuple[tf.Tensor, tuple]:
         """Preprocess state input to consistent tensor format.
 
         Args:
@@ -231,7 +272,7 @@ class PPOAgent(Agent):
     def _value_inference(self, state_tensor):
         return self.critic(state_tensor)
 
-    def policy(self, state: Union[tf.Tensor, np.ndarray]) -> tf.Tensor:
+    def policy(self, state: tf.Tensor | np.ndarray) -> tf.Tensor:
         """Returns action distribution parameters for the given state.
 
         Args:
@@ -246,11 +287,12 @@ class PPOAgent(Agent):
 
         return action_distribution_params
 
-    def value(self, state):
+    def value(self, state: tf.Tensor | np.ndarray, normalize: bool = False) -> tf.Tensor:
         """Returns the estimated state value for the given state or batch of states.
 
         Args:
             state: The state of the environment in shape (state_dim,), (N_steps, state_dim), or (N_steps, N_traces, d).
+            normalize: If True, returns normalized values. If False, automatically unnormalizes using stored statistics. Defaults to False.
         Returns:
             The value estimate for the given state with shape:
                 - (N_steps,) for input shape (N_steps, state_dim)
@@ -263,20 +305,29 @@ class PPOAgent(Agent):
         value_estimates = self._reshape_to_original(value_estimates, original_shape)
         value_estimates = tf.squeeze(value_estimates, axis=-1)
 
+        if not normalize:
+            value_estimates = self.unnormalize(value_estimates, "returns")
+
         return value_estimates
 
     @tf.function
-    def train_on_batch(self, states: tf.Tensor, actions: tf.Tensor, action_distribution_params: tf.Tensor, advantages: tf.Tensor, returns: tf.Tensor, *args: tf.Tensor, **kwargs):
-        """Train the actor and the critic on a batch of training data.
+    def train_on_batch(
+        self,
+        states: tf.Tensor,
+        actions: tf.Tensor,
+        action_distribution_params: tf.Tensor,
+        advantages: tf.Tensor,
+        returns: tf.Tensor
+    ):
+        """Train the actor and the critic on a batch of training data. The
+        batch should consist of normalized data if normalization is expected.
 
         Args:
             states: Batch of states, shape (batch_size, state_dim).
             actions: Batch of actions taken, shape (batch_size, action_dim).
             action_distribution_params: Batch of action distribution parameters used when actions were taken, shape (batch_size, action_distribution_params_dim).
-            advantages: Batch of estimated advantages, shape (batch_size,).
-            returns: Batch of estimated returns, shape (batch_size,).
-            *args: Additional positional arguments (not used).
-            **kwargs: Additional keyword arguments (not used).
+            advantages: Batch of estimated advantages (normalized), shape (batch_size,).
+            returns: Batch of estimated returns (normalized), shape (batch_size,).
         Returns:
             Dictionary containing the actor and critic losses.
         """
@@ -284,8 +335,8 @@ class PPOAgent(Agent):
         # states shape: (batch_size, state_dim)
         # actions shape: (batch_size, action_dim)
         # action_distribution_params shape: (batch_size, action_distribution_params_dim)
-        # advantages shape: (batch_size, )
-        # returns shape: (batch_size, )
+        # advantages shape: (batch_size, ), normalized if advantage normalization is enabled
+        # returns shape: (batch_size, ), normalized if return normalization is enabled
 
         # Train the critic.
         # ---------------------------------------------------------------------
@@ -313,6 +364,7 @@ class PPOAgent(Agent):
             # Calculate the probability ratio.
             new_log_probs = new_dist.log_prob(actions)
             old_log_probs = old_dist.log_prob(actions)
+
             # For multi-dimensional actions, sum log probabilities across
             # action dimensions to get the total log probability of the joint
             # action.
@@ -325,17 +377,20 @@ class PPOAgent(Agent):
             policy_objective = tf.minimum(ratio * advantages, clipped_ratio * advantages)
 
             # Choose between KL divergence and entropy.
-            if self.use_kl_divergence:
-                # Compute the average of the observed Kullback-Leibler divergences.
-                # For multi-dimensional actions, sum KL divergences across action dimensions.
-                kl_per_action = old_dist.kl_divergence(new_dist)
-                kl_per_action = tf.reduce_sum(kl_per_action, axis=-1)
-                kl_divergence = tf.reduce_mean(kl_per_action)
-                regularization_term = kl_divergence
+            if self.kl_beta > 0.0:
+                if self.use_kl_divergence:
+                    # Compute the average of the observed Kullback-Leibler divergences.
+                    # For multi-dimensional actions, sum KL divergences across action dimensions.
+                    kl_per_action = old_dist.kl_divergence(new_dist)
+                    kl_per_action = tf.reduce_sum(kl_per_action, axis=-1)
+                    kl_divergence = tf.reduce_mean(kl_per_action)
+                    regularization_term = kl_divergence
+                else:
+                    # Compute the entropy of the new distribution.
+                    entropy = tf.reduce_mean(tf.reduce_sum(new_dist.entropy(), axis=-1))
+                    regularization_term = entropy
             else:
-                # Compute the entropy of the new distribution.
-                entropy = tf.reduce_mean(tf.reduce_sum(new_dist.entropy(), axis=-1))
-                regularization_term = entropy
+                regularization_term = 0.0
 
             # The Actor loss is the negative of the objective to be maximized plus the regularization term.
             actor_loss = -(tf.reduce_mean(policy_objective) + self.kl_beta * regularization_term)
@@ -351,28 +406,24 @@ class PPOSimulationTrace(SimulationTrace):
 
     def __init__(
             self,
-            N_traces,
-            length,
-            state_dim,
-            action_dim,
-            action_distribution_params_dim,
-            discount_factor=1
+            agent: Agent,
+            N_traces: int,
+            length: int,
+            discount_factor: float = 1.0
         ):
         """Initialize the simulation trace.
 
         Args:
+            agent: The agent used for training.
             N_traces: Number of parallel traces.
             length: Length of each trace.
-            state_dim: Dimension of the state space.
-            action_dim: Dimension of the action space.
-            action_distribution_params_dim: Dimension of the action distribution parameters.
-            discount_factor: Discount factor used in the environment. Defaults to 1.
+            discount_factor: Discount factor used in the environment. Defaults to 1.0.
         """
 
-        super().__init__(N_traces, length, state_dim, action_dim, action_distribution_params_dim, discount_factor)
+        super().__init__(agent, N_traces, length, discount_factor)
 
         self.states = np.zeros((length, N_traces, self.state_dim), dtype=np.float32)
-        self.actions = np.zeros((length, N_traces, action_dim), dtype=np.float32)
+        self.actions = np.zeros((length, N_traces, self.action_dim), dtype=np.float32)
         self.rewards = np.zeros((length, N_traces), dtype=np.float32)
         self.terminateds = np.zeros((length, N_traces), dtype=np.bool)
         self.action_distribution_params = np.zeros((length, N_traces, self.action_distribution_params_dim), dtype=np.float32)
@@ -384,12 +435,7 @@ class PPOSimulationTrace(SimulationTrace):
         self.estimated_advantages = None
         self.estimated_returns = None
 
-        self.estimated_advantages_mean = 0.0
-        self.estimated_advantages_std = 1.0
-        self.estimated_returns_mean = 0.0
-        self.estimated_returns_std = 1.0
-
-    def __getitem__(self, key):
+    def __getitem__(self, key: str) -> np.ndarray:
         match key:
             case "state_value_estimates":
                 value = super().__getitem__(key)
@@ -410,7 +456,15 @@ class PPOSimulationTrace(SimulationTrace):
                 except KeyError:
                     raise KeyError(f"Unknown key: {key}")
 
-    def append(self, t: int, state: np.ndarray, action: np.ndarray, reward: np.ndarray, action_distribution_params: np.ndarray, terminated: np.ndarray):
+    def append(
+        self,
+        t: int,
+        state: np.ndarray,
+        action: np.ndarray,
+        reward: np.ndarray,
+        action_distribution_params: np.ndarray,
+        terminated: np.ndarray
+    ):
         """Append data for time step t.
 
         Args:
@@ -440,7 +494,7 @@ class PPOSimulationTrace(SimulationTrace):
 
         self.compute_advantages_and_returns(GAE_lambda=agent.GAE_lambda, next_state_value=next_state_value)
 
-    def get_as_dataset(self):
+    def get_as_dataset(self) -> tf.data.Dataset:
         """Return the trace data as a TensorFlow dataset for batched training.
 
         Returns:
@@ -471,28 +525,7 @@ class PPOSimulationTrace(SimulationTrace):
 
         return dataset
 
-    def unnormalize(self, normalized_values: Union[tf.Tensor,np.ndarray], what: str) -> np.ndarray:
-        """Unnormalize internally normalized values.
-
-        Args:
-            normalized_values: The normalized values to unnormalize.
-            what: A string indicating what type of values to unnormalize and return.
-        Returns:
-            The unnormalized values.
-        """
-
-        if what == "advantages":
-            if self.estimated_advantages_mean is None or self.estimated_advantages_std is None:
-                raise ValueError("Advantages have not been computed.")
-            return normalized_values * (self.estimated_advantages_std + 1e-8) + self.estimated_advantages_mean
-        elif what == "returns":
-            if self.estimated_returns_mean is None or self.estimated_returns_std is None:
-                raise ValueError("Returns have not been computed.")
-            return normalized_values * (self.estimated_returns_std + 1e-8) + self.estimated_returns_mean
-        else:
-            raise ValueError(f"Unknown what: {what}. Must be either 'advantages' or 'returns'.")
-
-    def compute_advantages_and_returns(self, GAE_lambda: float = 1, next_state_value: Union[np.ndarray,float] = 0.0):
+    def compute_advantages_and_returns(self, GAE_lambda: float = 1.0, next_state_value: np.ndarray = None):
         """Given that the trace has been completed and the next state value
         function value (can be an estimate, default 0), estimates its advantage
         values and returns. The advantages are estimated in the generalized
@@ -502,14 +535,17 @@ class PPOSimulationTrace(SimulationTrace):
 
         Args:
             GAE_lambda: The lambda parameter for GAE. Defaults to 1.
-            next_state_value: The estimated value of the state following the
-            last state in the trace. Defaults to 0.0."""
+            next_state_value: The estimated (unnormalized) value of the state
+            following the last state in the trace. Defaults to None which means zero value."""
 
         rewards = self.rewards
         terminateds = self.terminateds
         if self.state_value_estimates is None:
             raise ValueError("State value estimates have not been computed.")
         state_value_estimates = self.state_value_estimates
+
+        if next_state_value is None:
+            next_state_value = np.zeros((self.N_traces,), dtype=np.float32)
 
         self.estimated_advantages = np.zeros((self.length, self.N_traces), dtype=np.float32)
         gae = 0.0
@@ -529,10 +565,74 @@ class PPOSimulationTrace(SimulationTrace):
 
         self.estimated_returns = self.estimated_advantages + state_value_estimates
 
-        # Save as normalized and save means and stds for later unnormalization.
-        self.estimated_advantages_mean = np.mean(self.estimated_advantages)
-        self.estimated_advantages_std = np.std(self.estimated_advantages)
-        self.estimated_advantages = (self.estimated_advantages - self.estimated_advantages_mean) / (self.estimated_advantages_std + 1e-8)
-        self.estimated_returns_mean = np.mean(self.estimated_returns)
-        self.estimated_returns_std = np.std(self.estimated_returns)
-        self.estimated_returns = (self.estimated_returns - self.estimated_returns_mean) / (self.estimated_returns_std + 1e-8)
+    def normalize(self) -> dict:
+        """Normalize advantages and returns for training and return
+        normalization statistics.
+
+        This should be called after compute_advantages_and_returns() and before
+        get_as_dataset(). Uses the agent's normalize_advantages and
+        normalize_returns settings.
+
+        Returns:
+            Dictionary containing normalization statistics for 'advantages' and
+            'returns'.
+        """
+
+        if self.estimated_advantages is None or self.estimated_returns is None:
+            raise ValueError("Advantages and returns must be computed before normalization.")
+
+        # Use the agent's normalization settings.
+        normalize_advantages = self.agent.normalize_advantages
+        normalize_returns = self.agent.normalize_returns
+
+        stats = {}
+
+        # Compute and apply advantage normalization if enabled.
+        if normalize_advantages:
+            advantages_mean = float(np.mean(self.estimated_advantages))
+            advantages_std = float(np.std(self.estimated_advantages))
+            self.estimated_advantages = (self.estimated_advantages - advantages_mean) / (advantages_std + self.epsilon)
+            stats["advantages"] = {"mean": advantages_mean, "std": advantages_std}
+            self.normalization_stats["advantages"] = {"mean": advantages_mean, "std": advantages_std}
+
+        # Compute and apply return normalization if enabled.
+        if normalize_returns:
+            returns_mean = float(np.mean(self.estimated_returns))
+            returns_std = float(np.std(self.estimated_returns))
+            self.estimated_returns = (self.estimated_returns - returns_mean) / (returns_std + self.epsilon)
+            stats["returns"] = {"mean": returns_mean, "std": returns_std}
+            self.normalization_stats["returns"] = {"mean": returns_mean, "std": returns_std}
+
+        return stats
+
+    def unnormalize(self):
+        """Unnormalize advantages and returns that were normalized via a call
+        to self.normalize.
+
+        This should be called after compute_advantages_and_returns(). If the
+        method self.normalize has not been called and normalization statistics
+        are not available, this method does nothing. Uses the agent's
+        normalize_advantages and normalize_returns settings."""
+
+        if self.estimated_advantages is None or self.estimated_returns is None:
+            raise ValueError("Advantages and returns must be computed before unnormalization.")
+
+        # Use the agent's normalization settings.
+        normalize_advantages = self.agent.normalize_advantages
+        normalize_returns = self.agent.normalize_returns
+
+        stats = self.normalization_stats
+
+        # Unnormalize advantages if enabled.
+        if normalize_advantages and "advantages" in stats:
+            advantages_mean = stats["advantages"]["mean"]
+            advantages_std = stats["advantages"]["std"]
+            self.estimated_advantages = (advantages_std + self.epsilon)*self.estimated_advantages + advantages_mean
+            del self.normalization_stats["advantages"]
+
+        # Unnormalize returns if enabled.
+        if normalize_returns and "returns" in stats:
+            returns_mean = stats["returns"]["mean"]
+            returns_std = stats["returns"]["std"]
+            self.estimated_returns = (returns_std + self.epsilon)*self.estimated_returns + returns_mean
+            del self.normalization_stats["returns"]

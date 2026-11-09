@@ -1,25 +1,24 @@
 import argparse
 import os
-from typing import Union
 
 # Set environment variables for deterministic TensorFlow behavior.
 os.environ["TF_DETERMINISTIC_OPS"] = "1"
 os.environ["TF_CUDNN_DETERMINISTIC"] = "1"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
-import gymnasium as gym
+from gymnasium.vector import AsyncVectorEnv
 import numpy as np
 import tensorflow as tf
 import tqdm
 
 from agent import Agent
-from env import VahvistajaEnvironment
 from artifact_manager import ArtifactManager
 from callbacks import DefaultCallback
 from callback_manager import CallbackManager
 from simulation_trace import SimulationTrace, simulate_trace
 from util import *
 
-def setup_environment(config):
+def setup_environment(config: dict[str, Any], seed: int | None = None) -> AsyncVectorEnv:
     """Set up and create an environment based on the config."""
 
     env_name = config["environment"].get("name", None)                  # Name of the environment to use.
@@ -28,11 +27,11 @@ def setup_environment(config):
     N_env = config["environment"].get("N_env", 1)                       # How many parallel environments to use.
     discount_factor = config["environment"].get("discount_factor", 0.9) # Discount factor for future rewards.
 
-    env = create_environment(env_name, N_envs=N_env, discount_factor=discount_factor)
+    env = create_environment(env_name, N_envs=N_env, discount_factor=discount_factor, seed=seed)
 
     return env
 
-def create_agent(config, env):
+def create_agent(config: dict[str, Any], env: AsyncVectorEnv) -> Agent:
     """Creates and sets up the agent based on the config."""
 
     model_file = config["agent"]["file"]
@@ -42,21 +41,24 @@ def create_agent(config, env):
     model_params["action_space"] = env.get_attr("action_space")[0]
     model_params["observation_space"] = env.get_attr("observation_space")[0]
 
+    if "epsilon" in config:
+        model_params["epsilon"] = float(config["epsilon"])
+
     agent = model_class(**model_params)
 
     return agent
 
 def train(
         agent: Agent,
-        env: VahvistajaEnvironment,
+        env: AsyncVectorEnv,
         st_class: SimulationTrace,
         N_episodes: int,
         N_steps: int,
         reset_prob: float,
         epochs_per_episode: int,
         batch_size: int,
-        callback_manager: Union[CallbackManager,None]=None
-    ):
+        callback_manager: CallbackManager | None = None
+    ) -> int:
     """Trains the agent on the environment.
 
     Args:
@@ -92,9 +94,7 @@ def train(
     N_env = env.num_envs
     env_init_state = env.get_attr("init_state")[0] # Initial state of the environment.
 
-    N_total_steps = 0              # Total number of steps taken in the environment.
-    episodes_estimated_return = [] # Tracks the estimated return of the initial state for each episode.
-    min_episodes_criterion = 20    # How many previous estimated episode returns are considered when deciding convergence.
+    N_total_steps = 0 # Total number of steps taken in the environment.
 
     episodes = tqdm.trange(N_episodes)
     for episode in episodes:
@@ -102,10 +102,14 @@ def train(
 
         # Set the episode initial state. We start from a random initial state a
         # certain proportion of the time.
-        init_state = list(env.call("get_random_state"))
-        for i in range(N_env):
-            if np.random.rand() >= reset_prob:
-                init_state[i] = env_init_state
+        if reset_prob > 0:
+            random_states, _ = env.reset()
+            init_state = list(random_states)
+            for i in range(N_env):
+                if np.random.rand() >= reset_prob:
+                    init_state[i] = env_init_state
+        else:
+            init_state = [env_init_state for _ in range(N_env)]
 
         # Simulate an episode trace.
         trace, final_state_value_estimate = simulate_trace(st_class, env, agent, N_steps, init_state=init_state)
@@ -117,8 +121,14 @@ def train(
         except NotImplementedError:
             pass
 
+        # Normalize the trace data and update agent's normalization statistics.
+        normalization_stats = trace.normalize()
+        agent.update_normalization_stats(normalization_stats)
+
         # Create dataset.
         dataset = trace.get_as_dataset()
+
+        callback_manager.on_dataset_creation(dataset)
 
         # Train the agent on the trace.
         for epoch in range(epochs_per_episode):
@@ -159,15 +169,10 @@ def train(
                 break
 
         # Get the agent's current estimate of the true value for the initial state.
-        normalized_estimated_value = agent.value(env.get_attr("init_state")[0]).numpy()[0]
-        estimated_value = trace.unnormalize(normalized_estimated_value, "returns")
+        estimated_value = agent.value(env.get_attr("init_state")[0]).numpy()[0]
 
-        # Progress is measured by the estimated value of the initial state.
-        episodes_estimated_return.append(estimated_value)
-        running_return = np.mean(episodes_estimated_return[-min_episodes_criterion:])
-
-        # Display episode return and running return in the progress bar.
-        episodes.set_postfix(episode_return=trace["returns"], running_return=running_return)
+        # Display episode return in the progress bar.
+        episodes.set_postfix(episode_return=trace["returns"])
 
         logs = {
             "N_episodes": N_episodes,
@@ -186,21 +191,21 @@ def train(
     callback_manager.on_train_end()
     env.close()
 
-    return episode, running_return
+    return episode
 
 def main(config, seed=None):
-    use_gpu = config.get("use_gpu", False)
-    if not use_gpu:
-        tf.config.set_visible_devices([], "GPU")
-
     # Set seed for reproducibility.
     seed = seed if seed is not None else 0
     set_seed(seed)
 
+    use_gpu = config.get("use_gpu", False)
+    if not use_gpu:
+        tf.config.set_visible_devices([], "GPU")
+
     # Set up and create the environment.
     # -------------------------------------------------------------------------
-    env = setup_environment(config) # The environment.
-    N_env = env.num_envs            # Number of parallel environments.
+    env = setup_environment(config, seed=seed) # The environment.
+    N_env = env.num_envs                       # Number of parallel environments.
 
     # Episode / training batch settings.
     # -------------------------------------------------------------------------
@@ -223,14 +228,13 @@ def main(config, seed=None):
     # -------------------------------------------------------------------------
     agent = create_agent(config, env)
 
-    # Set up artifact manager and check for existing artifacts.
+    # Set up artifact manager.
     # -------------------------------------------------------------------------
     artifact_manager = ArtifactManager(config, seed)
-    artifact_manager.ensure_no_conflicts(agent)
 
     # Set up the callbacks.
     # -------------------------------------------------------------------------
-    callback_manager = CallbackManager(env=env, agent=agent)
+    callback_manager = CallbackManager(env=env, agent=agent, artifact_manager=artifact_manager)
 
     # Add default callback first.
     default_callback = DefaultCallback()
@@ -250,7 +254,7 @@ def main(config, seed=None):
 
     # Train the agent on the environment.
     # -------------------------------------------------------------------------
-    episode, running_return = train(
+    episode = train(
         agent,
         env,
         SimulationTraceClass,
@@ -262,13 +266,14 @@ def main(config, seed=None):
         callback_manager
     )
 
+    # Find the mean running return for the past 20 episodes.
+    # TODO: This number should be configurable.
+    running_return = np.mean(default_callback.episode_returns[-20:])
+
     if episode < N_episodes - 1:
         print(f"\nSolved at episode {episode+1}: average return: {running_return:.2f}!")
     else:
         print(f"\nNot solved after {N_episodes} episodes: average return: {running_return:.2f}.")
-
-    # Save the model.
-    artifact_manager.save_training_artifacts(agent)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

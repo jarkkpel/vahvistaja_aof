@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Any
 
 import gymnasium as gym
 from gymnasium.envs.registration import register
@@ -11,7 +11,7 @@ from callbacks import BaseCallback
 class FaustmannEnv(VahvistajaEnvironment):
     """A Faustmann discrete time forest rotation environment."""
 
-    def __init__(self, env_idx: Union[int,None]=None, discount_factor: float=1.0):
+    def __init__(self, env_idx: int | None = None, discount_factor: float = 1.0):
         """Initialize the Faustmann discrete time forest rotation environment.
 
         Args:
@@ -81,7 +81,7 @@ class FaustmannEnv(VahvistajaEnvironment):
 
         return self.observation_space.sample()
 
-    def reset(self, seed: Union[int,None] = None, options: Union[dict,list,None] = None):
+    def reset(self, seed: int | None = None, options: dict | list | None = None) -> tuple[np.ndarray, dict]:
         """Reset the environment to a state.
 
         Args:
@@ -94,8 +94,6 @@ class FaustmannEnv(VahvistajaEnvironment):
         """
 
         super().reset(seed=seed)
-        if seed is not None:
-            self.seed(seed)
 
         if options is not None:
             if self.env_idx is not None:
@@ -122,9 +120,50 @@ class FaustmannEnv(VahvistajaEnvironment):
 
 class FaustmannCallback(BaseCallback):
     """An optional callback for the Faustmann environment that displays the
-    probability of harvest for all states."""
+    probability of harvest for all states.
 
-    def on_episode_end(self, episode: int, logs: Union[dict,None]=None):
+    Optionally saves the probabilities to CSV files for later analysis and comparison.
+    """
+
+    def __init__(
+        self,
+        save_to_file: bool = False,
+        save_interval: int = 10
+    ):
+        """Initialize the Faustmann callback.
+
+        Args:
+            save_to_file: Whether to save probabilities to a file. Defaults to False.
+            save_interval: Save probabilities every N episodes. Defaults to 10.
+        """
+
+        super().__init__()
+        self.save_to_file = save_to_file
+        self.save_interval = save_interval
+        self._get_artifact_path = None
+
+    def _register_artifact(self):
+        """Register the harvest probability artifact with the artifact manager."""
+
+        if self.artifact_manager is None:
+            return
+
+        # Define the filename generator function.
+        def filename_gen(episode: int) -> str:
+            return f"episode_{episode:04d}.csv"
+
+        # Register the artifact and get the path generator.
+        try:
+            self._get_artifact_path = self.artifact_manager.register_artifact(
+                artifact_identifier="harvest_probabilities",
+                artifact_description="FaustmannCallback_harvest_probabilities",
+                file_name_generator=filename_gen,
+                check_conflicts=True
+            )
+        except FileExistsError as e:
+            raise e
+
+    def on_episode_end(self, episode: int, logs: dict[str, Any] | None = None):
         """Display the probability of harvest for all states.
 
         Args:
@@ -142,3 +181,19 @@ class FaustmannCallback(BaseCallback):
 
         with np.printoptions(precision=2, suppress=True):
             print(f"Prob. to harvest {probs}.")
+
+        # Optionally save to file.
+        if self.save_to_file and (episode + 1) % self.save_interval == 0:
+            # Register artifact on first save attempt.
+            if self._get_artifact_path is None:
+                self._register_artifact()
+
+            if self._get_artifact_path is None:
+                raise RuntimeError("Cannot save - artifact manager not available or conflicts exist.")
+
+            # Get the artifact path using the registered callable.
+            file_path = self._get_artifact_path(episode + 1)
+
+            # Save the data.
+            data = np.column_stack((states.flatten(), probs))
+            np.savetxt(file_path, data, delimiter=",", header="state,harvest_probability", comments="", fmt="%d,%.6f")
